@@ -11,11 +11,12 @@ local ALTHUE_SERVICE	= "urn:upnp-org:serviceId:althue1"
 local devicetype	= "urn:schemas-upnp-org:device:althue:1"
 -- local this_device	= nil
 local DEBUG_MODE	= false -- controlled by UPNP action
-local version		= "v1.0"
+local version		= "v1.44"
 local JSON_FILE = "D_ALTHUE.json"
 local UI7_JSON_FILE = "D_ALTHUE_UI7.json"
 local DEFAULT_REFRESH = 10
 local NAME_PREFIX	= "Hue "	-- trailing space needed
+local RAND_DELAY = 10
 local hostname		= ""
 local MapUID2Index={}
 local LightTypes = {
@@ -29,6 +30,9 @@ local LightTypes = {
 	["On/Off light"] =              {  dtype="urn:schemas-upnp-org:device:BinaryLight:1" , dfile="D_BinaryLight1.xml" },
 	["Color dimmable light"] =		{  dtype="urn:schemas-upnp-org:device:DimmableRGBLight:1" , dfile="D_DimmableRGBALTHue1.xml" },
 
+	-- OSRAM On Off Plug
+	["On/Off plug-in unit"] =		{  dtype="urn:schemas-upnp-org:device:BinaryLight:1" , dfile="D_BinaryLight1.xml" },
+	
 	-- default
 	["Default"] = 					{  dtype="urn:schemas-upnp-org:device:DimmableLight:1" , dfile="D_DimmableALTHue1.xml" }
 }
@@ -41,6 +45,7 @@ local SensorTypes = {
 local json = require("dkjson")
 local mime = require('mime')
 local socket = require("socket")
+local modurl = require ("socket.url")
 local http = require("socket.http")
 local ltn12 = require("ltn12")
 
@@ -414,6 +419,22 @@ function myALTHUE_Handler(lul_request, lul_parameters, lul_outputformat)
 		return json.encode(data or {}), "application/json"
 	  end, 
 	  
+	  ["setColorEffect"]=
+	  function(params)
+		local result = "err"
+		local effect = lul_parameters["effect"]
+		local hueuid = modurl.unescape(lul_parameters["hueuid"])
+		if (hueuid ~= nil) and (effect ~= nil) then
+			local childId,child = findChild( deviceID, hueuid )
+			if (childId ~= nil) then
+				UserSetEffect(deviceID,childId,effect)
+				result = "ok"
+			end
+		end
+		return json.encode(result or {}), "application/json"
+	  end, 
+	  
+	  
 	  -- ["runScene"]=
 	  -- function(params)
 		-- local id = lul_parameters["sceneid"] or ""
@@ -650,22 +671,25 @@ function UserSetLoadLevelTarget(lul_device,newValue)
 	local status = luup.variable_get("urn:upnp-org:serviceId:Dimming1", "LoadLevelStatus", lul_device)
 	if (status ~= newValue) then
 		newValue = tonumber(newValue)
-		local bri = math.floor(1+253*newValue/100)
+		local bri = math.floor(255*newValue/100)
 		local val = (newValue ~= 0)
-		luup.variable_set("urn:upnp-org:serviceId:Dimming1", "LoadLevelTarget", newValue, lul_device)
-		luup.variable_set("urn:upnp-org:serviceId:Dimming1", "LoadLevelStatus", newValue, lul_device)
-		luup.variable_set("urn:upnp-org:serviceId:SwitchPower1", "Target", val and "1" or "0", lul_device)
-		luup.variable_set("urn:upnp-org:serviceId:SwitchPower1", "Status", val and "1" or "0", lul_device)
-
-		HueLampSetState(lul_device,string.format('{"on": %s, "bri": %d}',tostring(val),bri))
+		if (bri==0)  then
+			HueLampSetState(lul_device,'{"on": false}')
+		else
+			luup.variable_set("urn:upnp-org:serviceId:Dimming1", "LoadLevelTarget", newValue, lul_device)
+			luup.variable_set("urn:upnp-org:serviceId:Dimming1", "LoadLevelStatus", newValue, lul_device)
+			luup.variable_set("urn:upnp-org:serviceId:SwitchPower1", "Target", val and "1" or "0", lul_device)
+			luup.variable_set("urn:upnp-org:serviceId:SwitchPower1", "Status", val and "1" or "0", lul_device)
+			HueLampSetState(lul_device,string.format('{"on": %s, "bri": %d}',tostring(val),bri))
+		end
 	end
 end
 
 function UserSetPowerTarget(lul_device,newTargetValue)
 	debug(string.format("UserSetPowerTarget(%s,%s)",lul_device,newTargetValue))
 	newTargetValue = tonumber(newTargetValue)
-	-- special case for cybrmage ZHA Securifi device ( power plug )
-	if (luup.devices[lul_device].device_type == LightTypes["On/Off light"].dtype) then
+	-- special case for BinaryLight devices like OSRAM plug or cybrmage ZHA Securifi device ( power plug )
+	if (luup.devices[lul_device].device_type == "urn:schemas-upnp-org:device:BinaryLight:1") then
 		local v = (newTargetValue > 0) and "1" or "0"
 		luup.variable_set("urn:upnp-org:serviceId:SwitchPower1", "Target", v, lul_device)
 		luup.variable_set("urn:upnp-org:serviceId:SwitchPower1", "Status", v, lul_device)
@@ -697,7 +721,8 @@ function UserSetColor(lul_device,newColorTarget)
 
 	local mired = math.floor(1000000/kelvin)
 	local newValue = luup.variable_get("urn:upnp-org:serviceId:Dimming1", "LoadLevelStatus", lul_device)
-	local bri = math.floor(1+253*tonumber(newValue)/100)
+	local bri = math.floor(255*newValue/100)
+	
 	debug(string.format("UserSetColor target: %s => bri:%s ct:%s",newColorTarget, bri,mired))
 	local body = string.format('{"on":true, "bri": %d, "ct":%s}', bri, mired )
 	HueLampSetState(lul_device,body)
@@ -709,9 +734,16 @@ function UserSetColorRGB(lul_device,newColorRGBTarget)
 	local x,y = rgb_to_cie(parts[1], parts[2], parts[3])
 	debug(string.format("RGB: %s => x:%s y:%s",newColorRGBTarget, tostring(x), tostring(y)))
 	local newValue = luup.variable_get("urn:upnp-org:serviceId:Dimming1", "LoadLevelStatus", lul_device)
-	local bri = math.floor(1+253*tonumber(newValue)/100)
+	local bri = math.floor(255*newValue/100)
 	local body = string.format('{"on": true, "bri": %d, "xy":[%f,%f]}',bri,x,y)
 	HueLampSetState(lul_device,body)
+end
+
+function UserSetEffect(lul_device,lul_child,newEffect)
+	newEffect = newEffect or "none"
+	debug(string.format("UserSetEffect(%s,%s,%s)",lul_device,lul_child,newEffect))
+	local body = string.format('{"effect":"%s"}', newEffect )
+	HueLampSetState(lul_child,body)
 end
 
 function UserSetArmed(lul_device,newArmedValue)
@@ -845,7 +877,7 @@ function refreshHueData(lul_device,norefresh)
 			local childId,child = findChild( lul_device, v.uniqueid )
 			if (childId~=nil) then
 				local status = (v.state.on == true) and "1" or "0"
-				local bri = math.floor(100 * ((v.state.bri or 1)-1) / 253)
+				local bri = math.ceil( 100*(v.state.bri or 0)/255 )
 				if (v.state.on == false) then
 					bri=0
 				end
@@ -855,16 +887,16 @@ function refreshHueData(lul_device,norefresh)
 				setVariableIfChanged("urn:upnp-org:serviceId:Dimming1", "LoadLevelTarget", bri, childId )
 				if (v.state.colormode ~= nil) then
 					local w,d,r,g,b=0,0,0,0,0
-					if (v.state.colormode == "xy") then
+					if (v.state.colormode == "xy") and (v.state.xy~=nil) then
 						r,g,b = cie_to_rgb(v.state.xy[1], v.state.xy[2], nil) -- v.state.bri
 					elseif (v.state.colormode == "hs") then
 						r,g,b = hsb_to_rgb(v.state.hue, v.state.sat, v.state.bri)
-					elseif (v.state.colormode == "ct") then
+					elseif (v.state.colormode == "ct") and (v.state.ct~=nil) then
 						local kelvin = math.floor(((1000000/v.state.ct)/100)+0.5)*100
 						w = (kelvin < 5450) and (math.floor((kelvin-2000)/13.52) + 1) or 0
 						d = (kelvin > 5450) and (math.floor((kelvin-5500)/13.52) + 1) or 0
 					else
-						warning(string.format("Unknown colormode:%s for Hue:%s, uniqueid:%s",v.state.colormode,idx,v.uniqueid))
+						warning(string.format("Unknown colormode:%s for Hue:%s, uniqueid:%s , state:%s",v.state.colormode,idx,v.uniqueid, json.encode(v.state)))
 					end
 					setVariableIfChanged("urn:micasaverde-com:serviceId:Color1", "CurrentColor", string.format("0=%s,1=%s,2=%s,3=%s,4=%s",w,d,r,g,b), childId )
 					hexcolor = rgbToHex(r,g,b)
@@ -899,7 +931,12 @@ function refreshHueData(lul_device,norefresh)
 						setVariableIfChanged("urn:micasaverde-com:serviceId:HaDevice1", "BatteryDate", convertedTimestamp or "", childId )
 					end
 					if (v.type == "ZLLTemperature") then
-						setVariableIfChanged("urn:upnp-org:serviceId:TemperatureSensor1", "CurrentTemperature", (v.state.temperature or 0)/100, childId )
+						local temp = (v.state.temperature or 0)/100
+						local tempformat = getSetVariable(ALTHUE_SERVICE,"TempFormat", lul_device, "C")
+						if (tempformat=="F") then
+							temp = (temp * 1.8) + 32
+						end
+						setVariableIfChanged("urn:upnp-org:serviceId:TemperatureSensor1", "CurrentTemperature", temp, childId )
 					elseif (v.type == "ZLLPresence") then
 						local tripped = (v.state.presence == true) and "1" or "0"
 						local armed = getSetVariable("urn:micasaverde-com:serviceId:SecuritySensor1", "Armed", childId, 0)
@@ -927,8 +964,8 @@ function refreshHueData(lul_device,norefresh)
 		debug(string.format("programming next refreshHueData(%s) in %s sec",lul_device,period))
 		luup.call_delay("refreshHueData",period,tostring(lul_device))
 	end
-	if (success==true) then
-		luup.variable_set(ALTHUE_SERVICE, "LastValidComm", os.time(), lul_device)
+	if (success~=true) then
+		luup.variable_set(ALTHUE_SERVICE, "LastFailedComm", os.time(), lul_device)
 	end
 	debug(string.format("refreshHueData returns  success is : %s",tostring(success)))
 	return success
@@ -1049,7 +1086,7 @@ local function startEngine(lul_device)
 	else
 		setAttrIfChanged("manufacturer", data.name, lul_device)
 		setAttrIfChanged("model", data.modelid, lul_device)
-		luup.variable_set(ALTHUE_SERVICE, "BulbModelID", data.modelid, lul_device)
+		-- luup.variable_set(ALTHUE_SERVICE, "BulbModelID", data.modelid, lul_device)
 		setAttrIfChanged("mac", data.mac, lul_device)
 		setAttrIfChanged("name", data.name, lul_device)
 	end
@@ -1068,7 +1105,9 @@ function startupDeferred(lul_device)
 	local credentials	 = getSetVariable(ALTHUE_SERVICE, "Credentials", lul_device, "")
 	local NamePrefix = getSetVariable(ALTHUE_SERVICE, "NamePrefix", lul_device, NAME_PREFIX)
 	local iconCode = getSetVariable(ALTHUE_SERVICE,"IconCode", lul_device, "0")
-	local lastvalid = getSetVariable(ALTHUE_SERVICE,"LastValidComm", lul_device, "")
+	local lastvalid = getSetVariable(ALTHUE_SERVICE,"LastFailedComm", lul_device, "")
+	local tempformat = getSetVariable(ALTHUE_SERVICE,"TempFormat", lul_device, "C")
+	setAttrIfChanged("category_num", 26, lul_device)	--Philips Controller
 
 	-- sanitize
 	if (tonumber(period)==0) then
@@ -1165,7 +1204,7 @@ function initstatus(lul_device)
   log("initstatus("..lul_device..") starting version: "..version)
   checkVersion(lul_device)
   hostname = getIP()
-  local delay = 1	-- delaying first refresh by x seconds
+  local delay = math.random(RAND_DELAY)	-- delaying first refresh by x seconds
   debug("initstatus("..lul_device..") startup for Root device, delay:"..delay)
   luup.call_delay("startupDeferred", delay, tostring(lul_device))
 end

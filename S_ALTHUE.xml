@@ -11,13 +11,7 @@
             <defaultValue>0</defaultValue>
             <shortCode>debug</shortCode>
         </stateVariable>
-	<stateVariable sendEvents="no">
-            <name>BulbModelID</name>
-            <dataType>string</dataType>
-            <defaultValue></defaultValue>
-            <shortCode>BulbModelID</shortCode>
-        </stateVariable>
-	<stateVariable sendEvents="yes">
+		<stateVariable sendEvents="yes">
             <name>IconCode</name>
             <dataType>ui4</dataType>
             <defaultValue>0</defaultValue>
@@ -34,6 +28,18 @@
             <dataType>string</dataType>
             <defaultValue></defaultValue>
             <shortCode>huesceneid</shortCode>
+        </stateVariable>
+        <stateVariable sendEvents="no">
+            <name>ChildID</name>
+            <dataType>ui4</dataType>
+            <defaultValue></defaultValue>
+            <shortCode>lul_child</shortCode>
+        </stateVariable>
+        <stateVariable sendEvents="no">
+            <name>NewEffect</name>
+            <dataType>string</dataType>
+            <defaultValue></defaultValue>
+            <shortCode>neweffect</shortCode>
         </stateVariable>
 	</serviceStateTable>
     <actionList>
@@ -69,6 +75,21 @@
                     <name>hueSceneID</name>
                     <direction>in</direction>
                     <relatedStateVariable>HueSceneID</relatedStateVariable>
+                </argument>
+            </argumentList>
+		</action>
+        <action>
+            <name>SetEffect</name>
+            <argumentList>
+                <argument>
+                    <name>childID</name>
+                    <direction>in</direction>
+                    <relatedStateVariable>ChildID</relatedStateVariable>
+                </argument>
+                <argument>
+                    <name>newEffect</name>
+                    <direction>in</direction>
+                    <relatedStateVariable>NewEffect</relatedStateVariable>
                 </argument>
             </argumentList>
 		</action>
